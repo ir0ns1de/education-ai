@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Chatbot Penyuluh (RAG)</title>
+
+  <!-- Bootstrap (optional, bikin rapi) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+
+  <style>
+    body { background:#f4f6f9; }
+    .chat-card { max-width:900px; margin:24px auto; box-shadow:0 6px 18px rgba(0,0,0,0.06); }
+    .messages-content { padding:16px; height:420px; overflow:auto; background:#fff; }
+    .msg { margin-bottom:14px; }
+    .msg .bubble { padding:12px; border-radius:10px; border:1px solid #e9ecef; background:#fff; }
+    .msg.bot .bubble { background:#eef6ff; border-color:#d7e9ff; }
+    .meta-small { font-size:0.78rem; color:#6c757d; margin-top:6px; }
+    .persona-badge { font-weight:600; }
+    a.message-link { word-break:break-all; }
+    .small-note { font-size:0.85rem; color:#6c757d; margin-top:8px; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="card chat-card">
+    <div class="card-header d-flex justify-content-between align-items-center bg-primary text-white">
+      <div>
+        <strong>Chatbot Penyuluh</strong>
+        <small id="persona-badge" class="badge bg-light text-primary ms-2 persona-badge">Persona: -</small>
+      </div>      
+    </div>
+
+    <div class="messages-content" id="messages-box">
+      <!-- messages -->
+    </div>
+
+    <div class="card-footer">
+      <div class="mb-2">
+        <textarea id="rag-input" class="form-control" rows="3" placeholder="Tulis pertanyaan..." disabled></textarea>
+      </div>
+      <div class="d-flex gap-2">
+        <button id="rag-send" class="btn btn-primary" disabled>Kirim</button>
+        <button id="btn-clear" class="btn btn-outline-secondary">Hapus Chat</button>
+      </div>
+      <div class="small-note">Catatan: jawaban hanya berasal dari DATA yang dikonfigurasi di file (static).</div>
+    </div>
+  </div>
+</div>
+
+<!-- jQuery + Bootstrap (optional) -->
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+/*
+  === STATIC CONFIGURATION (edit di sini) ===
+
+  Edit ketiga konstanta ini: API_KEY, PERSONA, DATA_TEXT.
+  - API_KEY: string API key Google Generative Language API
+  - PERSONA: satu baris ringkas menggambarkan persona asisten
+  - DATA_TEXT: teks knowledge yang menjadi satu-satunya sumber jawaban
+*/
+const API_KEY = "PUT_YOUR_API_KEY_HERE"; // contoh: "AIzaSy..." (ganti dengan key Anda)
+const PERSONA = "Penyuluh pertanian, nada ramah dan teknis"; // ubah sesuai kebutuhan
+const DATA_TEXT = `Masukkan / tempelkan di sini seluruh teks knowledge yang menjadi sumber jawaban.
+Contoh:
+- Teknik budidaya padi organik: langkah 1, langkah 2...
+- Panduan pemupukan: jenis pupuk, dosis...
+(Anda dapat memasukkan beberapa paragraf panjang)`;
+/* === END CONFIGURATION === */
+
+const API_KEY_KEY = "gemini_apikey_static_demo"; // hanya untuk optional localStorage sync if wanted
+
+/* Helpers */
+function escapeHtml(s){ if(s===undefined||s===null) return ""; return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'", "&#39;"); }
+function renderText(raw){
+  if(raw===undefined||raw===null) return "";
+  let t = escapeHtml(String(raw));
+  t = t.replace(/https?:\/\/[^\s<]+/g, m => `<a class="message-link" href="${m}" target="_blank" rel="noopener">${m}</a>`);
+  t = t.replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>");
+  t = t.replace(/(^|[^*])\*(?!\*)(.+?)\*(?!\*)/g,(m,p1,p2)=>`${p1}<em>${p2}</em>`);
+  return t.split(/\r?\n/).map(l=> l===""? "<br>": `<div>${l}</div>`).join("\n");
+}
+function timeNow(){ const d=new Date(); return d.getHours()+":"+String(d.getMinutes()).padStart(2,"0"); }
+
+const $messages = $("#messages-box");
+const $input = $("#rag-input");
+const $send = $("#rag-send");
+const $btnClear = $("#btn-clear");
+const $btnReload = $("#btn-reload");
+const $personaBadge = $("#persona-badge");
+
+function appendMessage(who, text){
+  const isBot = who.toLowerCase()==="bot";
+  const $m = $(`
+    <div class="msg ${isBot ? 'bot' : 'user'}">
+      <div><strong>${escapeHtml(who)}</strong></div>
+      <div class="bubble mt-2">${renderText(text)}</div>
+      <div class="meta-small">${timeNow()}</div>
+    </div>
+  `);
+  $messages.append($m);
+  $messages.scrollTop($messages[0].scrollHeight);
+}
+function clearMessages(){ $messages.empty(); }
+
+/* Initialize using static config */
+function initFromStatic() {
+  // Optional: copy to localStorage to inspect
+  try { localStorage.setItem(API_KEY_KEY, API_KEY); } catch(e){}
+
+  if (!API_KEY || API_KEY.includes("PUT_YOUR_API_KEY_HERE")) {
+    appendMessage("Bot", "API Key belum diatur. Edit konstanta API_KEY di bagian atas skrip.");
+    disableChat();
+    updatePersonaBadge(null);
+    return;
+  }
+  if (!PERSONA || !PERSONA.trim()) {
+    appendMessage("Bot", "Persona belum diatur. Edit konstanta PERSONA di bagian atas skrip.");
+    disableChat();
+    updatePersonaBadge(null);
+    return;
+  }
+  if (!DATA_TEXT || !DATA_TEXT.trim()) {
+    appendMessage("Bot", "DATA belum diatur. Edit konstanta DATA_TEXT di bagian atas skrip.");
+    disableChat();
+    updatePersonaBadge(null);
+    return;
+  }
+
+  updatePersonaBadge(PERSONA);
+  appendMessage("Bot", `Chat aktif. Persona: **${PERSONA}**. Semua jawaban akan **hanya** memakai DATA yang dikonfigurasi di file.`);
+  enableChat();
+}
+
+/* UI control */
+function enableChat(){ $input.prop("disabled", false); $send.prop("disabled", false); $input.focus(); }
+function disableChat(){ $input.prop("disabled", true); $send.prop("disabled", true); }
+function updatePersonaBadge(val){ $personaBadge.text(val ? "Persona: " + val : "Persona: -"); }
+
+/* Core: send to Gemini (no system role) */
+async function sendToGemini(apiKey, persona, dataText, userMsg){
+  const approxLength = (persona||"").length + (dataText||"").length + (userMsg||"").length;
+  const LIMIT = 150000; // conservative
+  if (approxLength > LIMIT) throw new Error("DATA terlalu panjang untuk dikirim sepenuhnya dari browser. Ringkas atau gunakan backend.");
+
+  const combinedPrompt = [
+    "Persona:",
+    persona,
+    "",
+    "DATA (USE THIS AS THE ONLY SOURCE OF TRUTH):",
+    dataText,
+    "",
+    "INSTRUCTIONS:",
+    "1) Jawab hanya menggunakan informasi yang ada di DATA di atas.",
+    "2) Jangan menggunakan pengetahuan eksternal atau mengada-ada.",
+    "3) Bila DATA tidak cukup, katakan tidak cukup informasi dan minta data tambahan.",
+    "4) Gunakan nada sesuai Persona.",
+    "",
+    "QUESTION:",
+    userMsg
+  ].join("\n");
+
+  const body = {
+    contents: [
+      { role: "user", parts: [{ text: combinedPrompt }] }
+    ]
+  };
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(()=>"");
+    try {
+      const json = JSON.parse(txt||"{}");
+      if (json?.error?.message) throw new Error(json.error.message);
+    } catch(e){}
+    throw new Error(txt || `HTTP ${res.status}`);
+  }
+
+  const ct = res.headers.get("content-type") || "";
+  const data = ct.includes("application/json") ? await res.json() : { text: await res.text() };
+
+  let reply = "";
+  if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+    reply = data.candidates[0].content.parts[0].text;
+  } else if (data?.output?.[0]?.content?.[0]?.text) {
+    reply = data.output[0].content[0].text;
+  } else if (typeof data === "string") {
+    reply = data;
+  } else if (data?.text) {
+    reply = data.text;
+  } else {
+    reply = "Maaf, bentuk respon tidak dikenali.";
+  }
+
+  return reply;
+}
+
+/* Handlers */
+$send.on("click", async () => {
+  const userMsg = $input.val().trim();
+  if (!userMsg) return;
+  appendMessage("Kamu", userMsg);
+  $input.val("");
+  appendMessage("Bot", "<em>Bot sedang mengetik...</em>");
+
+  try {
+    const reply = await sendToGemini(API_KEY, PERSONA, DATA_TEXT, userMsg);
+
+    // remove typing placeholder (simple)
+    const last = $messages.children().last();
+    if (last && last.text().toLowerCase().includes("mengetik")) last.remove();
+
+    appendMessage("Bot", reply);
+  } catch (err) {
+    const last = $messages.children().last();
+    if (last && last.text().toLowerCase().includes("mengetik")) last.remove();
+    appendMessage("Bot", "Error: " + (err?.message || err));
+    console.error(err);
+  }
+});
+
+$input.on("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $send.click(); }
+});
+
+$btnClear.on("click", () => { if (confirm("Hapus riwayat chat?")) clearMessages(); });
+
+$btnReload.on("click", () => {
+  // simply reload page to re-read static constants (if edited in hosting)
+  location.reload();
+});
+
+/* Init */
+initFromStatic();
+</script>
+</body>
+</html>

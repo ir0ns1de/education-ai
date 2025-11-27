@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Chatbot Penyuluh (RAG) — Persona & Data</title>
+
+  <!-- Bootstrap -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+
+  <style>
+    body { background:#f4f6f9; }
+    .chat-card { max-width:900px; margin:24px auto; box-shadow:0 6px 18px rgba(0,0,0,0.06); }
+    .messages-content { padding:16px; height:420px; overflow:auto; background:#fff; }
+    .msg { margin-bottom:14px; }
+    .msg .bubble { padding:12px; border-radius:10px; border:1px solid #e9ecef; background:#fff; }
+    .msg.bot .bubble { background:#eef6ff; border-color:#d7e9ff; }
+    .meta-small { font-size:0.78rem; color:#6c757d; margin-top:6px; }
+    .persona-badge { font-weight:600; }
+    a.message-link { word-break:break-all; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="card chat-card">
+    <div class="card-header d-flex justify-content-between align-items-center bg-primary text-white">
+      <div>
+        <strong>Chatbot Penyuluh</strong>
+        <small id="persona-badge" class="badge bg-light text-primary ms-2 persona-badge">Persona: -</small>
+      </div>
+      <div>
+        <button class="btn btn-sm btn-outline-light" id="open-settings">Settings</button>
+      </div>
+    </div>
+
+    <div class="messages-content" id="messages-box">
+      <!-- messages go here -->
+    </div>
+
+    <div class="card-footer">
+      <div class="mb-2">
+        <textarea id="rag-input" class="form-control" rows="3" placeholder="Tulis pertanyaan..." disabled></textarea>
+      </div>
+      <div class="d-flex gap-2">
+        <button id="rag-send" class="btn btn-primary" disabled>Kirim</button>
+        <button id="btn-clear" class="btn btn-outline-secondary">Hapus Chat</button>
+      </div>
+      <div class="form-text mt-2">Catatan: Jawaban akan **hanya** menggunakan Persona & DATA yang Anda set di Settings.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Settings -->
+<div class="modal fade" id="settingsModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header bg-primary text-white">
+        <h5 class="modal-title">Pengaturan — API Key, Persona, DATA</h5>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">API Key Gemini</label>
+          <input id="apikey-input" class="form-control" placeholder="Masukkan API Key (contoh: AIz...)" />
+          <div class="form-text">Dapatkan API key di Google Cloud Console / Generative Language API.</div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label">Persona (satu baris)</label>
+          <input id="persona-input" class="form-control" placeholder="Contoh: 'Penyuluh pertanian, nada ramah dan teknis'"/>
+          <div class="form-text">Bot akan menjawab sesuai persona ini.</div>
+        </div>
+
+        <div class="mb-3">
+          <label class="form-label">DATA / Knowledge (teks)</label>
+          <textarea id="data-input" class="form-control" rows="8" placeholder="Tempel data / teks yang menjadi sumber jawaban"></textarea>
+          <div class="form-text">Semua jawaban harus **hanya** memakai informasi dari DATA ini.</div>
+        </div>
+
+        <div class="alert alert-warning small" id="settings-warning" style="display:none;">
+          <strong>Perhatian:</strong> Ketiga item (API Key, Persona, DATA) wajib diisi agar chat aktif.
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button id="btn-clear-all" class="btn btn-outline-danger">Hapus Semua</button>
+        <button id="btn-clear-data" class="btn btn-secondary">Hapus DATA</button>
+        <button id="btn-save-settings" class="btn btn-primary">Simpan & Aktifkan</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Dependencies -->
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+/* ========= Config keys ========= */
+const API_KEY_KEY = "gemini_apikey";
+const PERSONA_KEY = "rag_persona";
+const DATA_KEY = "rag_data";
+
+/* ========= Small helpers ========= */
+function escapeHtml(s){ if(s===undefined||s===null) return ""; return String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'", "&#39;"); }
+function renderText(raw){
+  if(raw===undefined||raw===null) return "";
+  let t = escapeHtml(String(raw));
+  // urls
+  t = t.replace(/https?:\/\/[^\s<]+/g, m => `<a class="message-link" href="${m}" target="_blank" rel="noopener">${m}</a>`);
+  // bold
+  t = t.replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>");
+  // italic
+  t = t.replace(/(^|[^*])\*(?!\*)(.+?)\*(?!\*)/g,(m,p1,p2)=>`${p1}<em>${p2}</em>`);
+  return t.split(/\r?\n/).map(l=> l===""? "<br>": `<div>${l}</div>`).join("\n");
+}
+function timeNow(){ const d=new Date(); return d.getHours()+":"+String(d.getMinutes()).padStart(2,"0"); }
+
+/* ========= UI refs ========= */
+const $messages = $("#messages-box");
+const $input = $("#rag-input");
+const $send = $("#rag-send");
+const $openSettings = $("#open-settings");
+const $personaBadge = $("#persona-badge");
+
+/* ========= Load settings ========= */
+let API_KEY = localStorage.getItem(API_KEY_KEY);
+let PERSONA = localStorage.getItem(PERSONA_KEY);
+let DATA_TEXT = localStorage.getItem(DATA_KEY);
+
+/* ========= UI functions ========= */
+function appendMessage(who, text, opts={}) {
+  const isBot = who.toLowerCase()==="bot";
+  const $m = $(`
+    <div class="msg ${isBot ? 'bot' : 'user'}">
+      <div><strong>${escapeHtml(who)}</strong></div>
+      <div class="bubble mt-2">${renderText(text)}</div>
+      <div class="meta-small">${timeNow()}</div>
+    </div>
+  `);
+  $messages.append($m);
+  $messages.scrollTop($messages[0].scrollHeight);
+}
+function clearMessages(){ $messages.empty(); }
+
+/* ========= Settings modal handling ========= */
+const settingsModal = new bootstrap.Modal(document.getElementById('settingsModal'));
+
+function prefillSettingsInputs(){
+  $("#apikey-input").val(API_KEY || "");
+  $("#persona-input").val(PERSONA || "");
+  $("#data-input").val(DATA_TEXT || "");
+  validateSettingsUI();
+}
+function validateSettingsUI(){
+  if(!API_KEY || !PERSONA || !DATA_TEXT){
+    $("#settings-warning").show();
+  } else {
+    $("#settings-warning").hide();
+  }
+}
+function updatePersonaBadge(){
+  $personaBadge.text(PERSONA ? "Persona: " + PERSONA : "Persona: -");
+}
+
+/* Open modal on start if not set */
+$(document).ready(()=>{
+  prefillSettingsInputs();
+  if(!API_KEY || !PERSONA || !DATA_TEXT){
+    settingsModal.show();
+    appendMessage("Bot","Silakan isi API Key, Persona, dan DATA melalui Settings sebelum menggunakan chat.");
+    disableChat();
+  } else {
+    enableChat();
+    appendMessage("Bot", `Halo! Chatbot aktif dengan persona: **${PERSONA}**. Semua jawaban hanya berbasis DATA.` );
+    updatePersonaBadge();
+  }
+});
+
+/* Buttons */
+$("#open-settings").click(()=>{ prefillSettingsInputs(); settingsModal.show(); });
+$("#btn-clear-data").click(()=>{ if(confirm("Hapus DATA saja?")){ $("#data-input").val(""); localStorage.removeItem(DATA_KEY); DATA_TEXT=null; validateSettingsUI(); disableChat(); alert("DATA dihapus."); }});
+$("#btn-clear-all").click(()=>{ if(confirm("Hapus semua pengaturan (API, Persona, DATA)?")){ $("#apikey-input,#persona-input,#data-input").val(""); localStorage.removeItem(API_KEY_KEY); localStorage.removeItem(PERSONA_KEY); localStorage.removeItem(DATA_KEY); API_KEY=PERSONA=DATA_TEXT=null; validateSettingsUI(); updatePersonaBadge(); disableChat(); alert("Semua pengaturan dihapus."); }});
+
+$("#btn-save-settings").click(()=>{
+  const key = $("#apikey-input").val().trim();
+  const persona = $("#persona-input").val().trim();
+  const data = $("#data-input").val().trim();
+  if(!key || !persona || !data){ alert("API Key, Persona, dan DATA harus diisi semua."); return; }
+  localStorage.setItem(API_KEY_KEY, key);
+  localStorage.setItem(PERSONA_KEY, persona);
+  localStorage.setItem(DATA_KEY, data);
+  API_KEY = key; PERSONA = persona; DATA_TEXT = data;
+  updatePersonaBadge();
+  validateSettingsUI();
+  settingsModal.hide();
+  enableChat();
+  appendMessage("System", "Pengaturan tersimpan. Chat diaktifkan.");
+});
+
+/* ========= Chat enabling/disabling ========= */
+function enableChat(){ $input.prop("disabled", false); $send.prop("disabled", false); $input.focus(); }
+function disableChat(){ $input.prop("disabled", true); $send.prop("disabled", true); }
+
+/* ========= Clear chat button ========= */
+$("#btn-clear").click(()=>{ if(confirm("Hapus riwayat chat?")) clearMessages(); });
+
+/* ========= Core: send prompt (no system role) ========= */
+async function sendToGemini(apiKey, persona, dataText, userMsg){
+  // guard length (conservative)
+  const approxLen = (persona||"").length + (dataText||"").length + (userMsg||"").length;
+  const LIMIT = 150000; // conservative threshold
+  if(approxLen > LIMIT) throw new Error("DATA terlalu panjang untuk dikirim keseluruhan dari browser. Silakan ringkas atau gunakan backend RAG.");
+
+  const combinedPrompt = [
+    "Persona:",
+    persona,
+    "",
+    "DATA (USE THIS AS THE ONLY SOURCE OF TRUTH):",
+    dataText,
+    "",
+    "INSTRUCTIONS:",
+    "1) Answer strictly and ONLY using information present in the DATA above.",
+    "2) Do NOT use external knowledge, do not invent facts, and do not add opinions.",
+    "3) If the DATA does not contain enough information to answer, say you don't have enough information and ask for more data.",
+    "4) Keep the tone consistent with the Persona.",
+    "",
+    "QUESTION:",
+    userMsg
+  ].join("\n");
+
+  const body = {
+    contents: [
+      { role: "user", parts: [{ text: combinedPrompt }] }
+    ]
+  };
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  });
+
+  if(!res.ok){
+    const txt = await res.text().catch(()=>"");
+    try { const j = JSON.parse(txt||"{}"); if(j?.error?.message) throw new Error(j.error.message); } catch(e){}
+    throw new Error(txt || `HTTP ${res.status}`);
+  }
+
+  const ct = res.headers.get("content-type") || "";
+  const data = ct.includes("application/json") ? await res.json() : { text: await res.text() };
+
+  let reply = "";
+  if(data?.candidates?.[0]?.content?.parts?.[0]?.text){
+    reply = data.candidates[0].content.parts[0].text;
+  } else if(data?.output?.[0]?.content?.[0]?.text){
+    reply = data.output[0].content[0].text;
+  } else if(typeof data === "string"){
+    reply = data;
+  } else if(data?.text){
+    reply = data.text;
+  } else {
+    reply = "Maaf, bentuk respon tidak dikenali.";
+  }
+
+  return reply;
+}
+
+/* ========= Send button handler ========= */
+$send.click(async ()=>{
+  const userMsg = $input.val().trim();
+  if(!userMsg) return;
+  appendMessage("Kamu", userMsg);
+  $input.val("");
+  appendMessage("Bot", "<em>Bot sedang mengetik...</em>");
+  try{
+    const api = localStorage.getItem(API_KEY_KEY);
+    const persona = localStorage.getItem(PERSONA_KEY);
+    const data = localStorage.getItem(DATA_KEY);
+    if(!api || !persona || !data) throw new Error("Pengaturan (API/Persona/DATA) tidak lengkap. Buka Settings.");
+
+    const reply = await sendToGemini(api, persona, data, userMsg);
+
+    // remove typing placeholder (simple)
+    const last = $messages.children().last();
+    if(last && last.text().toLowerCase().includes("mengetik")) last.remove();
+
+    appendMessage("Bot", reply);
+  } catch(err){
+    const last = $messages.children().last();
+    if(last && last.text().toLowerCase().includes("mengetik")) last.remove();
+    appendMessage("Bot", "Error: " + (err?.message || err));
+    console.error(err);
+  }
+});
+
+/* Enter to send (shift+enter newline) */
+$input.on("keydown", function(e){
+  if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); $send.click(); }
+});
+</script>
+
+</body>
+</html>

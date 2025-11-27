@@ -1,0 +1,308 @@
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css">
+
+<div class="container my-4">
+
+  <div class="card">
+    <div class="card-header bg-primary text-white">
+      Chatbot Penyuluh
+    </div>
+
+    <div class="card-body" id="chat-box" style="height:360px; overflow:auto;">
+      <div class="messages-content"></div>
+    </div>
+
+    <div class="card-footer">
+      <div class="mb-2">
+        <textarea class="form-control message-input" rows="3" placeholder="Tulis pertanyaan..." disabled></textarea>
+        <div class="form-text mt-1">
+          Butuh API Key? Dapatkan petunjuk di:
+          <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener">Google API KEY</a>
+        </div>
+      </div>
+      <div class="d-grid gap-2">
+        <button class="btn btn-outline-secondary" id="change-apikey">Ganti API Key</button>
+        <button class="btn btn-primary message-submit" disabled>Kirim</button>
+      </div>
+    </div>
+
+  </div>
+
+</div>
+
+<!-- Modal Input API Key -->
+<div class="modal fade" id="apiKeyModal" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+
+      <div class="modal-header bg-primary text-white">
+        <h5 class="modal-title">Masukkan API Key Gemini</h5>
+      </div>
+
+      <div class="modal-body">
+        <label for="apikey-input">API Key:</label>
+        <input type="text" class="form-control" id="apikey-input" placeholder="Masukkan API Key">
+        <small class="text-muted d-block mt-2">
+          Panduan: jika belum punya, dapatkan API Key dari Google API KEY. Contoh: 
+          <a href="https://aistudio.google.com/api-keys" target="_blank" rel="noopener">dapatkan</a>
+        </small>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-secondary" id="clear-apikey">Hapus (jika ingin ulang)</button>
+        <button class="btn btn-primary" id="save-apikey">Simpan</button>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+// -------------------- Utility: Escape HTML --------------------
+function escapeHtml(str) {
+  if (!str) return "";
+  return str
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+// -------------------- Simple Markdown-like Renderer --------------------
+function renderMessage(rawText) {
+  if (!rawText) return "";
+
+  // 1) Escape HTML first
+  let text = escapeHtml(rawText);
+
+  // 2) Convert URLs to links (simple regex)
+  // allow http/https
+  text = text.replace(
+    /https?:\/\/[^\s<]+/g,
+    match => `<a href="${match}" target="_blank" rel="noopener">${match}</a>`
+  );
+
+  // 3) Bold: **text**
+  text = text.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+
+  // 4) Italic: *text*  (avoid conflict with bold that uses **)
+  text = text.replace(/(^|[^*])\*(?!\*)(.+?)\*(?!\*)/g, (m, p1, p2) => {
+    return `${p1}<em>${p2}</em>`;
+  });
+
+  // 5) Lists: convert lines starting with -, * or number. We'll handle blocks.
+  // Split into lines and process groups
+  const lines = text.split(/\r?\n/);
+  let out = [];
+  let inUl = false;
+  let inOl = false;
+
+  function closeLists() {
+    if (inUl) { out.push("</ul>"); inUl = false; }
+    if (inOl) { out.push("</ol>"); inOl = false; }
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (line.match(/^([-*])\s+(.+)/)) {
+      if (!inUl) { closeLists(); out.push("<ul>"); inUl = true; }
+      const item = line.replace(/^([-*])\s+(.+)/, "$2");
+      out.push(`<li>${item}</li>`);
+    } else if (line.match(/^\d+\.\s+(.+)/)) {
+      if (!inOl) { closeLists(); out.push("<ol>"); inOl = true; }
+      const item = line.replace(/^\d+\.\s+(.+)/, "$1");
+      out.push(`<li>${item}</li>`);
+    } else if (line === "") {
+      // blank line -> close lists and add paragraph break
+      closeLists();
+      out.push("<br>");
+    } else {
+      // normal paragraph line
+      closeLists();
+      out.push(`<div>${line}</div>`);
+    }
+  }
+  closeLists();
+
+  // Join and return
+  return out.join("\n");
+}
+
+// -------------------- API Key Handling --------------------
+let API_KEY = localStorage.getItem("gemini_apikey");
+
+$(document).ready(() => {
+  if (!API_KEY) {
+    // show modal to force input
+    const modal = new bootstrap.Modal(document.getElementById('apiKeyModal'));
+    modal.show();
+  } else {
+    enableChat();
+  }
+  showGreeting();
+});
+
+// Save API key
+$("#save-apikey").click(() => {
+  const key = $("#apikey-input").val().trim();
+  if (!key) return alert("API Key tidak boleh kosong!");
+
+  localStorage.setItem("gemini_apikey", key);
+  API_KEY = key;
+
+  const modalEl = document.getElementById('apiKeyModal');
+  const modal = bootstrap.Modal.getInstance(modalEl);
+  modal.hide();
+
+  enableChat();
+});
+
+// Clear API key (for convenience)
+$("#clear-apikey").click(() => {
+  $("#apikey-input").val("");
+  localStorage.removeItem("gemini_apikey");
+  API_KEY = null;
+  alert("API Key dihapus dari localStorage. Masukkan API Key baru jika ingin melanjutkan.");
+});
+
+// Change/ganti API Key button (opens modal filled with current key)
+$("#change-apikey").click(() => {
+  $("#apikey-input").val(API_KEY || "");
+  const modal = new bootstrap.Modal(document.getElementById('apiKeyModal'));
+  modal.show();
+});
+
+function enableChat() {
+  $(".message-input").prop("disabled", false);
+  $(".message-submit").prop("disabled", false);
+  $(".message-input").focus();
+}
+
+// -------------------- Greeting --------------------
+function showGreeting() {
+  const greeting = `**Bot:** Halo! Aku Chabot Penyuluh siap membantumu`;
+
+  $(".messages-content").append(`
+    <div class="mb-2">
+      <div>${renderMessage(greeting)}</div>
+      <div class="text-muted small mt-1">${timeNow()}</div>
+      <hr>
+    </div>
+  `);
+  scrollBottom();
+}
+
+// -------------------- Input Events --------------------
+$(".message-submit").click(insertMessage);
+$(window).keydown(e => { 
+  if (e.which === 13 && !e.shiftKey) { 
+    insertMessage(); 
+    return false; 
+  } 
+});
+
+// -------------------- Insert User Message --------------------
+function insertMessage() {
+  const raw = $(".message-input").val().trim();
+  if (!raw) return;
+
+  $(".messages-content").append(`
+    <div class="mb-2">
+      <div><strong>Kamu:</strong> ${escapeHtml(raw)}</div>
+      <div class="text-muted small mt-1">${timeNow()}</div>
+      <hr>
+    </div>
+  `);
+
+  $(".message-input").val("");
+  scrollBottom();
+  setTimeout(() => botReply(raw), 400);
+}
+
+// -------------------- Bot Reply (non-RAG) --------------------
+function botReply(userMsg) {
+  // show typing
+  const typingId = "typing-" + Date.now();
+  $(".messages-content").append(`<div id="${typingId}"><em>Bot sedang mengetik...</em></div>`);
+  scrollBottom();
+
+  // Prepare request body (simple)
+  const body = {
+    contents: [{
+      role: "user",
+      parts: [{ text: userMsg }]
+    }]
+  };
+
+  // Endpoint: Gemini via Generative Language API (adjust model/endpoint as needed)
+  fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${API_KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  })
+  .then(async res => {
+    // handle non-json or error
+    const ct = res.headers.get("content-type") || "";
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(txt || "HTTP error " + res.status);
+    }
+    if (ct.includes("application/json")) return res.json();
+    return res.text().then(t => ({ text: t }));
+  })
+  .then(data => {
+    $("#" + typingId).remove();
+
+    // Try to extract reply text
+    let reply = "";
+    if (data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+      reply = data.candidates[0].content.parts[0].text;
+    } else if (typeof data === "string") {
+      reply = data;
+    } else if (data?.text) {
+      reply = data.text;
+    } else {
+      reply = "Maaf, tidak ada jawaban.";
+    }
+
+    // Render using the markdown-like renderer
+    const html = renderMessage(reply);
+
+    $(".messages-content").append(`
+      <div class="mb-2">
+        <div><strong>Bot:</strong></div>
+        <div class="mt-1">${html}</div>
+        <div class="text-muted small mt-1">${timeNow()}</div>
+        <hr>
+      </div>
+    `);
+    scrollBottom();
+  })
+  .catch(err => {
+    $("#" + typingId).remove();
+    console.error(err);
+    $(".messages-content").append(`
+      <div class="mb-2">
+        <div><strong>Bot:</strong> Error menghubungi API.</div>
+        <div class="text-muted small mt-1">${timeNow()}</div>
+        <hr>
+      </div>
+    `);
+    scrollBottom();
+  });
+}
+
+// -------------------- Helpers --------------------
+function scrollBottom() {
+  const box = document.getElementById("chat-box");
+  box.scrollTop = box.scrollHeight;
+}
+
+function timeNow() {
+  const d = new Date();
+  return d.getHours() + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+</script>
